@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET="${1:-check}"
+WORKSPACE="${2:-}"
+SOURCE_MODE="${3:-}"
+TIMING_FLAG="${4:-}"
+IMAGE="${CI_BOX_IMAGE:-draupnir/ci-box:dev}"
+REBUILD="${CI_BOX_REBUILD:-0}"
+PUBLISHED_REPOSITORY="${CI_BOX_PUBLISHED_REPOSITORY:-ghcr.io/the-draupnir-project/ci-box}"
+PUBLISHED_TAG="${CI_BOX_PUBLISHED_TAG:-}"
+TIMING_VERBOSE="${CI_BOX_TIMING_VERBOSE:-0}"
+SCRIPT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+VERSION_FILE="${SCRIPT_ROOT}/VERSION"
+CI_BOX_VERSION="${CI_BOX_VERSION:-}"
+
+if [[ -z "${CI_BOX_VERSION}" ]] && [[ -f "${VERSION_FILE}" ]]; then
+    CI_BOX_VERSION="$(head -n1 "${VERSION_FILE}" | tr -d '[:space:]')"
+fi
+
+if [[ -z "${CI_BOX_VERSION}" ]]; then
+    CI_BOX_VERSION="0.0.0-dev"
+fi
+
+usage() {
+    echo "Usage: ./ci-box <check|build-lint|unit|integration|appservice-integration|all|version> <workspace> [local-build|published-tag] [--verbose-timing]" >&2
+}
+
+if [[ "${TARGET}" == "version" ]] || [[ "${TARGET}" == "--version" ]]; then
+    echo "ci-box ${CI_BOX_VERSION}"
+    exit 0
+fi
+
+if [[ -n "${TIMING_FLAG}" ]]; then
+    if [[ "${TIMING_FLAG}" == "--verbose-timing" ]]; then
+        TIMING_VERBOSE="1"
+    else
+        echo "Unknown fourth argument: ${TIMING_FLAG}" >&2
+        usage
+        exit 2
+    fi
+fi
+
+check_preflight() {
+    echo "[ci-box] workspace: ${WORKSPACE}"
+    echo "[ci-box] target: ${TARGET}"
+
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "[ci-box] docker: MISSING"
+        echo "[ci-box] install Docker and enable Linux containers before running CI targets"
+        return 1
+    fi
+
+    echo "[ci-box] docker: found"
+    if ! docker version >/dev/null 2>&1; then
+        echo "[ci-box] docker daemon: not reachable"
+        echo "[ci-box] start Docker and wait for engine ready"
+        return 1
+    fi
+
+    echo "[ci-box] docker daemon: reachable"
+    return 0
+}
+
+get_repo_digest_for_tag() {
+    local tag_ref
+    tag_ref="${PUBLISHED_REPOSITORY}:${PUBLISHED_TAG}"
+
+    docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${tag_ref}" 2>/dev/null \
+        | grep "^${PUBLISHED_REPOSITORY}@sha256:" \
+        | head -n1 || true
+}
+
+validate_repo_digest_ref() {
+    local digest_ref="$1"
+    local escaped_repo
+
+    escaped_repo="$(printf '%s' "${PUBLISHED_REPOSITORY}" | sed 's/[.[\*^$()+?{|]/\\&/g')"
+    if [[ ! "${digest_ref}" =~ ^${escaped_repo}@sha256:[0-9a-f]{64}$ ]]; then
+        echo "Integrity gate failed: digest ref '${digest_ref}' is not a valid ${PUBLISHED_REPOSITORY}@sha256:<64-hex> reference" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+is_semver_like_tag() {
+    local tag="$1"
+    [[ "${tag}" =~ ^(v)?[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]]
+}
+
+resolve_published_tag_image_ref() {
+    if [[ -z "${PUBLISHED_TAG}" ]]; then
+        echo "SOURCE_MODE=published-tag requires CI_BOX_PUBLISHED_TAG" >&2
+        return 1
+    fi
+
+    if [[ "${PUBLISHED_REPOSITORY}" != ghcr.io/* ]]; then
+        echo "[ci-box] warning: non-ghcr registry '${PUBLISHED_REPOSITORY}' is outside the supported policy boundary" >&2
+        echo "[ci-box] warning: behavior may differ and related issues are considered out-of-scope" >&2
+    fi
+
+    local tag_ref before_digest after_digest check_freshness
+    tag_ref="${PUBLISHED_REPOSITORY}:${PUBLISHED_TAG}"
+    before_digest=""
+    check_freshness="1"
+
+    if is_semver_like_tag "${PUBLISHED_TAG}"; then
+        check_freshness="0"
+    fi
+
+    if [[ "${check_freshness}" == "1" ]]; then
+        before_digest="$(get_repo_digest_for_tag)"
+    fi
+
+    echo "[ci-box] pulling published tag ${tag_ref}" >&2
+    docker pull "${tag_ref}"
+
+    after_digest="$(get_repo_digest_for_tag)"
+    if [[ -z "${after_digest}" ]]; then
+        echo "Unable to resolve pulled tag to digest: ${tag_ref}" >&2
+        return 1
+    fi
+
+    validate_repo_digest_ref "${after_digest}" || return 1
+
+    if [[ "${check_freshness}" == "1" ]]; then
+        if [[ -z "${before_digest}" ]]; then
+            echo "[ci-box] non-semver tag digest resolved (${PUBLISHED_TAG}): ${after_digest}" >&2
+        elif [[ "${before_digest}" == "${after_digest}" ]]; then
+            echo "[ci-box] non-semver tag digest unchanged (${PUBLISHED_TAG}): ${after_digest}" >&2
+        else
+            echo "[ci-box] non-semver tag digest updated (${PUBLISHED_TAG}): ${before_digest} -> ${after_digest}" >&2
+        fi
+    else
+        echo "[ci-box] semver-like tag resolved to digest (${PUBLISHED_TAG}): ${after_digest}" >&2
+    fi
+
+    echo "${after_digest}"
+    return 0
+}
+
+case "${TARGET}" in
+    check|build-lint|unit|integration|appservice-integration|all)
+        ;;
+    *)
+        usage
+        exit 2
+        ;;
+esac
+
+if [[ -z "${WORKSPACE}" ]]; then
+    echo "Workspace path is required as second argument." >&2
+    usage
+    exit 2
+fi
+
+if [[ ! -d "${WORKSPACE}" ]]; then
+    echo "Workspace path not found: ${WORKSPACE}" >&2
+    exit 2
+fi
+
+if [[ ! -f "${WORKSPACE}/package.json" ]]; then
+    echo "Workspace does not look like a Draupnir checkout (missing package.json): ${WORKSPACE}" >&2
+    exit 2
+fi
+
+if [[ "${TARGET}" == "check" ]]; then
+    if check_preflight; then
+        echo "[ci-box] preflight: ready"
+        exit 0
+    fi
+    echo "[ci-box] preflight: not ready"
+    exit 2
+fi
+
+if ! check_preflight; then
+    echo "[ci-box] cannot run target until prerequisites are ready" >&2
+    exit 2
+fi
+
+if [[ -z "${SOURCE_MODE}" ]]; then
+    echo "Select explicit source mode as third argument: local-build or published-tag" >&2
+    usage
+    exit 2
+fi
+
+case "${SOURCE_MODE}" in
+    local-build)
+        if [[ "${REBUILD}" == "1" ]]; then
+            echo "[ci-box] rebuilding image ${IMAGE}"
+            docker build -t "${IMAGE}" "$(cd "$(dirname "$0")" && pwd)"
+        else
+            if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+                echo "[ci-box] reusing existing image ${IMAGE} (set CI_BOX_REBUILD=1 to rebuild)"
+            else
+                echo "[ci-box] image not found locally, building ${IMAGE}"
+                docker build -t "${IMAGE}" "$(cd "$(dirname "$0")" && pwd)"
+            fi
+        fi
+        ;;
+    published-tag)
+        if [[ "${REBUILD}" == "1" ]]; then
+            echo "CI_BOX_REBUILD=1 cannot be used with SOURCE_MODE=published-tag" >&2
+            exit 2
+        fi
+
+        IMAGE="$(resolve_published_tag_image_ref)"
+        ;;
+    *)
+        echo "Unknown source mode: ${SOURCE_MODE}. Use local-build or published-tag." >&2
+        exit 2
+        ;;
+esac
+
+echo "[ci-box] running target ${TARGET} against workspace ${WORKSPACE}"
+docker run --rm --privileged \
+    --cgroupns=host \
+    -e CI=1 \
+    -e CI_BOX_MODE=local \
+    -e CI_BOX_TIMING_VERBOSE="${TIMING_VERBOSE}" \
+    -e WORKSPACE_SRC=/workspace-src \
+    -e WORKSPACE_DST=/workspace-cache/workspace \
+    -v "${WORKSPACE}:/workspace-src:ro" \
+    -v ci-box-workspace-cache:/workspace-cache \
+    -v ci-box-npm-cache:/cache/npm \
+    -v ci-box-cargo-cache:/cache/cargo \
+    -v ci-box-docker-data:/var/lib/docker \
+    "${IMAGE}" "${TARGET}"
