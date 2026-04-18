@@ -77,7 +77,7 @@ param(
     [switch]$Version,
 
     [Parameter()]
-    [string]$Image = "draupnir/ci-box:dev",
+    [string]$Image = "draupnir/ci-in-a-box:dev",
 
     [Parameter()]
     [ValidateSet("local-build", "published-tag")]
@@ -87,7 +87,7 @@ param(
     [switch]$Rebuild,
 
     [Parameter()]
-    [string]$PublishedRepository = "ghcr.io/the-draupnir-project/ci-box",
+    [string]$PublishedRepository = "ghcr.io/the-draupnir-project/ci-in-a-box",
 
     [Parameter()]
     [string]$PublishedTag,
@@ -149,7 +149,7 @@ function Invoke-DockerOrFail {
         [string]$FailureMessage
     )
 
-    & docker @Args
+    & docker @Args | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw $FailureMessage
     }
@@ -164,7 +164,7 @@ function Get-RepoDigestForTag {
     )
 
     $tagRef = "${Repository}:${Tag}"
-    $inspect = & docker image inspect $tagRef --format "{{json .RepoDigests}}" 2>$null
+    $inspect = & docker image inspect --format "{{json .RepoDigests}}" $tagRef 2>$null
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($inspect)) {
         return $null
     }
@@ -349,5 +349,6 @@ if ($ExtraArgs) {
 }
 
 Write-Host "[ci-box] running target $Target against workspace $Workspace"
+Write-Host "[ci-box] container image ref: $Image"
 & docker @dockerArgs
 exit $LASTEXITCODE
