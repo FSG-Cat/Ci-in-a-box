@@ -59,6 +59,12 @@ Enables verbose runtime/bootstrap logs in the container.
 .PARAMETER VerboseTiming
 Enables detailed per-target timing output in the container.
 
+.PARAMETER IntegrationCommand
+Overrides the integration test command inside the runtime container.
+
+.PARAMETER AppserviceIntegrationCommand
+Overrides the appservice-integration test command inside the runtime container.
+
 .EXAMPLE
 ./ci-box.ps1 check -Workspace C:\path\to\Draupnir
 
@@ -128,6 +134,12 @@ param(
 
     [Parameter()]
     [switch]$VerboseTiming,
+
+    [Parameter()]
+    [string]$IntegrationCommand,
+
+    [Parameter()]
+    [string]$AppserviceIntegrationCommand,
 
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ExtraArgs
@@ -394,6 +406,14 @@ $dockerArgs = @(
     "-v", "ci-box-cargo-cache:/cache/cargo",
     "-v", "ci-box-docker-data:/var/lib/docker"
 )
+
+if (-not [string]::IsNullOrWhiteSpace($IntegrationCommand)) {
+    $dockerArgs += @("-e", "CI_BOX_INTEGRATION_COMMAND=$IntegrationCommand")
+}
+
+if (-not [string]::IsNullOrWhiteSpace($AppserviceIntegrationCommand)) {
+    $dockerArgs += @("-e", "CI_BOX_APPSERVICE_INTEGRATION_COMMAND=$AppserviceIntegrationCommand")
+}
 
 if (-not [string]::IsNullOrWhiteSpace($SynapseHttpAntispamWorkspace)) {
     $dockerArgs += @("-v", "${SynapseHttpAntispamWorkspace}:/workspace-antispam-src:ro")

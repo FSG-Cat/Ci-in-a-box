@@ -277,6 +277,14 @@ docker_volume_args=()
 
 docker_env_args+=(-e "CI_BOX_LOG_DIR=/ci-box-logs/${RUN_ID}")
 
+if [[ -n "${CI_BOX_INTEGRATION_COMMAND:-}" ]]; then
+    docker_env_args+=(-e "CI_BOX_INTEGRATION_COMMAND=${CI_BOX_INTEGRATION_COMMAND}")
+fi
+
+if [[ -n "${CI_BOX_APPSERVICE_INTEGRATION_COMMAND:-}" ]]; then
+    docker_env_args+=(-e "CI_BOX_APPSERVICE_INTEGRATION_COMMAND=${CI_BOX_APPSERVICE_INTEGRATION_COMMAND}")
+fi
+
 if [[ -n "${SYNAPSE_IMAGE}" ]]; then
     docker_env_args+=(-e "CI_BOX_SYNAPSE_IMAGE=${SYNAPSE_IMAGE}")
 fi

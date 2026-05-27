@@ -52,6 +52,7 @@ TARGET_COUNT=0
 TARGET_COLD_COUNT=0
 TARGET_WARM_COUNT=0
 SUPPORT_STACK_REQUIRED=0
+CI_BOX_EXIT_CODE=""
 
 timing_verbose_enabled() {
     case "${TIMING_VERBOSE}" in
@@ -198,10 +199,19 @@ dump_support_stack_diagnostics() {
 
 diagnostics_on_exit() {
     local rc=$?
+    trap - EXIT
+    if [[ -n "${CI_BOX_EXIT_CODE}" ]]; then
+        rc="${CI_BOX_EXIT_CODE}"
+    fi
+    if is_runner; then
+        log "runner: exiting with code ${rc}"
+    else
+        log "orchestrator: exiting with code ${rc}"
+    fi
     if ! is_runner; then
         dump_support_stack_diagnostics || true
     fi
-    return ${rc}
+    exit ${rc}
 }
 
 trap diagnostics_on_exit EXIT
@@ -377,10 +387,29 @@ sync_workspace() {
         exit 2
     fi
 
-    rm -rf "${WORKSPACE_DST}"
+    if [[ -z "${WORKSPACE_DST}" || "${WORKSPACE_DST}" == "/" ]]; then
+        log "refusing to sync into unsafe workspace destination: ${WORKSPACE_DST}"
+        exit 2
+    fi
+
     mkdir -p "${WORKSPACE_DST}"
 
-    # Start from a blank destination so the copy is a clean mirror of the source checkout.
+    if ! is_runner && command -v docker >/dev/null 2>&1; then
+        if docker ps --format '{{.Names}}' | grep -Fxq "${CI_BOX_RUNNER_CONTAINER_NAME}"; then
+            log "workspace sync: runner container ${CI_BOX_RUNNER_CONTAINER_NAME} is active; preserving workspace root inode"
+        else
+            log "workspace sync: runner container ${CI_BOX_RUNNER_CONTAINER_NAME} is not active"
+        fi
+    fi
+
+    # Keep the mount root inode stable, but clear prior contents for clean-slate behavior.
+    shopt -s dotglob nullglob
+    for entry in "${WORKSPACE_DST}"/*; do
+        rm -rf -- "${entry}"
+    done
+    shopt -u dotglob nullglob
+
+    # Rehydrate from source under the sync exclusion contract.
     rsync -a --delete \
         --exclude='.ci-box-state/' \
         --exclude='node_modules/' \
@@ -925,7 +954,7 @@ ensure_build() {
 }
 
 run_target_with_timing() {
-    local name fn start end duration
+    local name fn start end duration fn_rc
     local dep_installs_before dep_installs_after build_runs_before build_runs_after cache_profile
 
     name="$1"
@@ -938,6 +967,10 @@ run_target_with_timing() {
 
     start="$(now_ms)"
     "${fn}"
+    fn_rc=$?
+    if [[ "${fn_rc}" -ne 0 ]]; then
+        CI_BOX_EXIT_CODE="${fn_rc}"
+    fi
     end="$(now_ms)"
 
     dep_installs_after="${DEPENDENCY_INSTALL_COUNT}"
@@ -954,6 +987,7 @@ run_target_with_timing() {
 
     TARGET_COUNT=$((TARGET_COUNT + 1))
     TIMING_LINES+=("target=${name} duration_ms=${duration} cache_profile=${cache_profile} deps=${TARGET_DEP_OUTCOME} build=${TARGET_BUILD_OUTCOME}")
+    return ${fn_rc}
 }
 
 print_timing_summary() {
@@ -1011,13 +1045,15 @@ run_integration() {
         smoke_check_support_stack
         run_integration_tests
     else
+        local runner_rc=0
+
         run_integration_common
         support_stack_up
         log "orchestrator: support stack is up and exposed on host (postgres:${POSTGRES_HOST_PORT}, synapse:${SYNAPSE_HOST_PORT})."
         smoke_check_support_stack
 
         if [[ "${CI_BOX_AUTO_RUNNER}" == "1" ]]; then
-            run_runner_container || true
+            run_runner_container || runner_rc=$?
         else
             log "orchestrator: auto-runner disabled (CI_BOX_AUTO_RUNNER!=1); not launching runner"
         fi
@@ -1039,6 +1075,11 @@ run_integration() {
             dump_support_stack_diagnostics || true
             log "orchestrator: runner finished; tearing down support stack"
             support_stack_down
+        fi
+
+        if [[ "${runner_rc}" -ne 0 ]]; then
+            log "orchestrator: runner failed with exit code ${runner_rc}"
+            return "${runner_rc}"
         fi
     fi
 }
@@ -1051,13 +1092,15 @@ run_appservice_integration() {
         smoke_check_support_stack
         run_workspace_command "${APPSERVICE_INTEGRATION_COMMAND}"
     else
+        local runner_rc=0
+
         run_integration_common
         support_stack_up
         log "orchestrator: support stack is up and exposed on host (postgres:${POSTGRES_HOST_PORT}, synapse:${SYNAPSE_HOST_PORT})."
         smoke_check_support_stack
 
         if [[ "${CI_BOX_AUTO_RUNNER}" == "1" ]]; then
-            run_runner_container || true
+            run_runner_container || runner_rc=$?
         else
             log "orchestrator: auto-runner disabled (CI_BOX_AUTO_RUNNER!=1); not launching runner"
         fi
@@ -1079,6 +1122,11 @@ run_appservice_integration() {
             dump_support_stack_diagnostics || true
             log "orchestrator: runner finished; tearing down support stack"
             support_stack_down
+        fi
+
+        if [[ "${runner_rc}" -ne 0 ]]; then
+            log "orchestrator: runner failed with exit code ${runner_rc}"
+            return "${runner_rc}"
         fi
     fi
 }
@@ -1099,9 +1147,13 @@ case "${TARGET}" in
         run_target_with_timing "appservice-integration" run_appservice_integration
         ;;
     all)
+        TARGET="build-lint"
         run_target_with_timing "build-lint" run_build_lint
+        TARGET="unit"
         run_target_with_timing "unit" run_unit
+        TARGET="integration"
         run_target_with_timing "integration" run_integration
+        TARGET="appservice-integration"
         run_target_with_timing "appservice-integration" run_appservice_integration
         ;;
     *)
