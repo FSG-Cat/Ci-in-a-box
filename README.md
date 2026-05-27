@@ -64,33 +64,9 @@ Example runner image usage (local-build):
 CI_BOX_ROLE=runner ./ci-box build-lint /path/to/Draupnir local-build
 ```
 
-Examples — orchestrator vs runner
-
-
-2. Start the orchestrator to bring up the support stack (keeps running until Ctrl+C):
-
-```bash
-CI_BOX_ROLE=orchestrator ./ci-box integration /path/to/Draupnir local-build
-```
-
-3a. Run the runner image (CI) to execute tests against the orchestrator’s stack. Per the Gen2 rules we do not use a custom baked runner image; the orchestrator will use an upstream Node image by default. You can override which upstream image to use with `CI_BOX_RUNNER_IMAGE`.
-
-```bash
-CI_BOX_RUNNER_IMAGE=node:24-slim CI_BOX_ROLE=runner ./ci-box integration /path/to/Draupnir local-build
-```
-
-3b. Or, for local development, run your local Draupnir checkout (outside the container) and point it at the exposed ports documented by the orchestrator logs.
-
-Configuration knobs for orchestrator/runner behavior
+Useful configuration knobs for box.
 
 - `CI_BOX_RUNNER_IMAGE`: image to use when the orchestrator auto-spawns the runner (default: `node:24-slim`).
-- `CI_BOX_AUTO_RUNNER`: when `1` (default), the orchestrator automatically launches the runner after the support stack becomes available. Set to `0` to disable automatic runner spawning.
-- `CI_BOX_ORCHESTRATOR_PERSIST_AFTER_RUN`: when `1`, the orchestrator will keep the support stack running after the runner exits (useful for iterative local development). Default is `0` (orchestrator tears down the stack after the runner completes).
-- `CI_BOX_SYNAPSE_SERVER_NAME`: Synapse `server_name` rendered into the generated config (default: `localhost:9999`).
-- `CI_BOX_SYNAPSE_PUBLIC_BASEURL`: Synapse `public_baseurl` rendered into the generated config (default: `http://localhost:9999`).
-- `CI_BOX_SYNAPSE_ANTISPAM_BASE_URL`: antispam callback URL rendered into Synapse config (default: `http://host.docker.internal:8082/api/1/spam_check`).
-- `CI_BOX_DRAUPNIR_APPSERVICE_URL`: appservice URL rendered into the generated registration file (default: `http://host.docker.internal:9000`).
-- `CI_BOX_POSTGRES_*`: Postgres connection and host-port settings for the support stack.
 
 Runtime notes:
 
