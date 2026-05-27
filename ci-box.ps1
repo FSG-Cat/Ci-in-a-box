@@ -121,7 +121,7 @@ param(
     [switch]$Rebuild,
 
     [Parameter()]
-    [string]$PublishedRepository = "ghcr.io/FSG-Cat/ci-in-a-box",
+    [string]$PublishedRepository = "ghcr.io/fsg-cat/ci-in-a-box",
 
     [Parameter()]
     [string]$PublishedTag,
