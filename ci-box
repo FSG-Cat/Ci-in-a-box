@@ -1,15 +1,29 @@
 #!/usr/bin/env bash
+#
+# SPDX-FileCopyrightText: 2026 Catalan Lover <catalanlover@protonmail.com>
+#
+# SPDX-License-Identifier: Apache-2.0
+
+if set -o | grep -q '^igncr[[:space:]]'; then
+    set -o igncr
+fi
+
 set -euo pipefail
 
 TARGET="${1:-check}"
 WORKSPACE="${2:-}"
 SOURCE_MODE="${3:-}"
 TIMING_FLAG="${4:-}"
-IMAGE="${CI_BOX_IMAGE:-draupnir/ci-box:dev}"
+IMAGE="${CI_BOX_IMAGE:-draupnir/ci-in-a-box:dev}"
+ROLE="${CI_BOX_ROLE:-orchestrator}"
 REBUILD="${CI_BOX_REBUILD:-0}"
-PUBLISHED_REPOSITORY="${CI_BOX_PUBLISHED_REPOSITORY:-ghcr.io/the-draupnir-project/ci-box}"
+PUBLISHED_REPOSITORY="${CI_BOX_PUBLISHED_REPOSITORY:-ghcr.io/FSG-Cat/ci-in-a-box}"
 PUBLISHED_TAG="${CI_BOX_PUBLISHED_TAG:-}"
 TIMING_VERBOSE="${CI_BOX_TIMING_VERBOSE:-0}"
+LOG_DIR="${CI_BOX_LOG_DIR_OVERRIDE:-}"
+SYNAPSE_IMAGE="${CI_BOX_SYNAPSE_IMAGE:-ghcr.io/element-hq/synapse:latest}"
+POSTGRES_IMAGE="${CI_BOX_POSTGRES_IMAGE:-postgres:18-alpine}"
+REVERSE_PROXY_IMAGE="${CI_BOX_REVERSE_PROXY_IMAGE:-nginx:stable-alpine}"
 SCRIPT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 VERSION_FILE="${SCRIPT_ROOT}/VERSION"
 CI_BOX_VERSION="${CI_BOX_VERSION:-}"
@@ -22,8 +36,22 @@ if [[ -z "${CI_BOX_VERSION}" ]]; then
     CI_BOX_VERSION="0.0.0-dev"
 fi
 
+if [[ -z "${LOG_DIR}" ]]; then
+    LOG_DIR="${SCRIPT_ROOT}/.ci-box-logs"
+fi
+
+mkdir -p "${LOG_DIR}"
+
+RUN_ID="$(date +%Y%m%d-%H%M%S)"
+RUN_LOG_DIR="${LOG_DIR}/${RUN_ID}"
+mkdir -p "${RUN_LOG_DIR}"
+
 usage() {
     echo "Usage: ./ci-box <check|build-lint|unit|integration|appservice-integration|all|version> <workspace> [local-build|published-tag] [--verbose-timing]" >&2
+    echo "" >&2
+    echo "Environment variables:" >&2
+    echo "  CI_BOX_LOG_DIR_OVERRIDE      Override default log directory (defaults to \$SCRIPT_ROOT/.ci-box-logs)" >&2
+    echo "  CI_BOX_SYNAPSE_HTTP_ANTISPAM_SOURCE  Path to synapse-http-antispam checkout for integration tests" >&2
 }
 
 if [[ "${TARGET}" == "version" ]] || [[ "${TARGET}" == "--version" ]]; then
@@ -165,6 +193,30 @@ if [[ ! -f "${WORKSPACE}/package.json" ]]; then
     exit 2
 fi
 
+case "${TARGET}" in
+    integration|appservice-integration|all)
+        if [[ -z "${CI_BOX_SYNAPSE_HTTP_ANTISPAM_SOURCE:-}" ]]; then
+            echo "ERROR: -SynapseHttpAntispamWorkspace is required for target '${TARGET}'" >&2
+            usage
+            exit 2
+        fi
+        ;;
+    *)
+        ;;
+esac
+
+if [[ -n "${CI_BOX_SYNAPSE_HTTP_ANTISPAM_SOURCE:-}" ]]; then
+    if [[ ! -d "${CI_BOX_SYNAPSE_HTTP_ANTISPAM_SOURCE}" ]]; then
+        echo "Synapse antispam workspace path not found: ${CI_BOX_SYNAPSE_HTTP_ANTISPAM_SOURCE}" >&2
+        exit 2
+    fi
+
+    if [[ ! -f "${CI_BOX_SYNAPSE_HTTP_ANTISPAM_SOURCE}/synapse_http_antispam.py" ]]; then
+        echo "Synapse antispam workspace must contain synapse_http_antispam.py: ${CI_BOX_SYNAPSE_HTTP_ANTISPAM_SOURCE}" >&2
+        exit 2
+    fi
+fi
+
 if [[ "${TARGET}" == "check" ]]; then
     if check_preflight; then
         echo "[ci-box] preflight: ready"
@@ -214,16 +266,51 @@ case "${SOURCE_MODE}" in
 esac
 
 echo "[ci-box] running target ${TARGET} against workspace ${WORKSPACE}"
-docker run --rm --privileged \
+echo "[ci-box] container image ref: ${IMAGE}"
+echo "[ci-box] logs: ${RUN_LOG_DIR}"
+
+orchestrator_container_name="ci-box-orchestrator"
+docker rm -f "${orchestrator_container_name}" >/dev/null 2>&1 || true
+
+docker_env_args=()
+docker_volume_args=()
+
+docker_env_args+=(-e "CI_BOX_LOG_DIR=/ci-box-logs/${RUN_ID}")
+
+if [[ -n "${SYNAPSE_IMAGE}" ]]; then
+    docker_env_args+=(-e "CI_BOX_SYNAPSE_IMAGE=${SYNAPSE_IMAGE}")
+fi
+if [[ -n "${POSTGRES_IMAGE}" ]]; then
+    docker_env_args+=(-e "CI_BOX_POSTGRES_IMAGE=${POSTGRES_IMAGE}")
+fi
+if [[ -n "${REVERSE_PROXY_IMAGE}" ]]; then
+    docker_env_args+=(-e "CI_BOX_REVERSE_PROXY_IMAGE=${REVERSE_PROXY_IMAGE}")
+fi
+if [[ -n "${CI_BOX_SYNAPSE_HTTP_ANTISPAM_SOURCE:-}" ]]; then
+    docker_env_args+=(-e "CI_BOX_SYNAPSE_HTTP_ANTISPAM_SOURCE=/workspace-antispam-src")
+    docker_volume_args+=(-v "${CI_BOX_SYNAPSE_HTTP_ANTISPAM_SOURCE}:/workspace-antispam-src:ro")
+fi
+
+orchestrator_log="${RUN_LOG_DIR}/orchestrator.log"
+set -o pipefail
+docker run --rm --name "${orchestrator_container_name}" --privileged \
     --cgroupns=host \
     -e CI=1 \
     -e CI_BOX_MODE=local \
+    -e CI_BOX_ROLE="${ROLE}" \
+    -e CI_BOX_NO_CACHE="${CI_BOX_NO_CACHE:-0}" \
     -e CI_BOX_TIMING_VERBOSE="${TIMING_VERBOSE}" \
     -e WORKSPACE_SRC=/workspace-src \
     -e WORKSPACE_DST=/workspace-cache/workspace \
     -v "${WORKSPACE}:/workspace-src:ro" \
+    -v "${LOG_DIR}:/ci-box-logs" \
     -v ci-box-workspace-cache:/workspace-cache \
     -v ci-box-npm-cache:/cache/npm \
     -v ci-box-cargo-cache:/cache/cargo \
     -v ci-box-docker-data:/var/lib/docker \
-    "${IMAGE}" "${TARGET}"
+    "${docker_volume_args[@]}" \
+    "${docker_env_args[@]}" \
+    "${IMAGE}" "${TARGET}" 2>&1 | tee -a "${orchestrator_log}"
+exit_code=${PIPESTATUS[0]}
+set +o pipefail
+exit ${exit_code}

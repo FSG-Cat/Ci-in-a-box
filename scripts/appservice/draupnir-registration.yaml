@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Catalan Lover <catalanlover@protonmail.com>
+#
+# SPDX-License-Identifier: Apache-2.0
+  id: "draupnir-for-all"
+  as_token: "as_token"
+  hs_token: "hs_token"
+  url: "__CI_BOX_DRAUPNIR_APPSERVICE_URL__"
+  sender_localpart: draupnir-moderation
+  namespaces:
+    users:
+      - exclusive: true
+        regex: '@mjolnir_.*'
+      - exclusive: true
+        regex: '@draupnir_.*'
+  rate_limited: false

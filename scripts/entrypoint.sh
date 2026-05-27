@@ -16,7 +16,12 @@ shift || true
 
 export CI=1
 export CI_BOX_MODE="${CI_BOX_MODE:-local}"
+export CI_BOX_ROLE="${CI_BOX_ROLE:-orchestrator}"
 export DOCKER_HOST="unix:///var/run/docker.sock"
+
+if [[ "${CI_BOX_ROLE}" == "runner" ]]; then
+    exec /usr/local/bin/ci-targets.sh "$TARGET" "$@"
+fi
 
 DOCKER_DATA_ROOT="${DOCKER_DATA_ROOT:-/var/lib/docker}"
 DOCKERD_LOG="/tmp/dockerd.log"

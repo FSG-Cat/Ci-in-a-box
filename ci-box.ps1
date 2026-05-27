@@ -19,11 +19,24 @@ appservice-integration, all, or version.
 .PARAMETER Workspace
 Path to a Draupnir checkout. Required for all non-version targets.
 
+.PARAMETER SynapseHttpAntispamWorkspace
+Path to an externally checked out synapse-http-antispam repository.
+Required for integration, appservice-integration, and all.
+
 .PARAMETER Version
 Prints the launcher version and exits.
 
 .PARAMETER Image
 Container image reference used in local-build mode.
+
+.PARAMETER SynapseImage
+Optional Synapse image reference forwarded to the runtime container.
+
+.PARAMETER PostgresImage
+Optional Postgres image reference forwarded to the runtime container.
+
+.PARAMETER ReverseProxyImage
+Optional reverse proxy image reference forwarded to the runtime container.
 
 .PARAMETER SourceMode
 Image source mode for non-check targets: local-build or published-tag.
@@ -45,9 +58,6 @@ Enables verbose runtime/bootstrap logs in the container.
 
 .PARAMETER VerboseTiming
 Enables detailed per-target timing output in the container.
-
-.PARAMETER ExtraArgs
-Additional arguments forwarded to the in-container target runner.
 
 .EXAMPLE
 ./ci-box.ps1 check -Workspace C:\path\to\Draupnir
@@ -74,10 +84,28 @@ param(
     [string]$Workspace,
 
     [Parameter()]
+    [string]$LogDir,
+
+    [Parameter()]
+    [string]$SynapseHttpAntispamWorkspace,
+
+    [Parameter()]
     [switch]$Version,
 
     [Parameter()]
     [string]$Image = "draupnir/ci-in-a-box:dev",
+
+    [Parameter()]
+    [string]$Role = "orchestrator",
+
+    [Parameter()]
+    [string]$SynapseImage,
+
+    [Parameter()]
+    [string]$PostgresImage,
+
+    [Parameter()]
+    [string]$ReverseProxyImage,
 
     [Parameter()]
     [ValidateSet("local-build", "published-tag")]
@@ -87,7 +115,7 @@ param(
     [switch]$Rebuild,
 
     [Parameter()]
-    [string]$PublishedRepository = "ghcr.io/the-draupnir-project/ci-in-a-box",
+    [string]$PublishedRepository = "ghcr.io/FSG-Cat/ci-in-a-box",
 
     [Parameter()]
     [string]$PublishedTag,
@@ -109,7 +137,7 @@ $ErrorActionPreference = "Stop"
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $versionFile = Join-Path $scriptRoot "VERSION"
-$ciBoxVersion = $env:CI_BOX_VERSION
+$ciBoxVersion = ""
 
 if ([string]::IsNullOrWhiteSpace($ciBoxVersion) -and (Test-Path $versionFile)) {
     $ciBoxVersion = (Get-Content -Path $versionFile -TotalCount 1).Trim()
@@ -134,6 +162,35 @@ if (-not (Test-Path $Workspace)) {
 
 if (-not (Test-Path (Join-Path $Workspace "package.json"))) {
     throw "Workspace does not look like a Draupnir checkout (missing package.json): $Workspace"
+}
+
+if ([string]::IsNullOrWhiteSpace($LogDir)) {
+    $LogDir = Join-Path $scriptRoot ".ci-box-logs"
+}
+
+if (-not (Test-Path $LogDir)) {
+    New-Item -ItemType Directory -Path $LogDir | Out-Null
+}
+
+$runId = Get-Date -Format "yyyyMMdd-HHmmss"
+$runLogDir = Join-Path $LogDir $runId
+if (-not (Test-Path $runLogDir)) {
+    New-Item -ItemType Directory -Path $runLogDir | Out-Null
+}
+
+$requiresSupportStack = @("integration", "appservice-integration", "all") -contains $Target
+if ($requiresSupportStack -and [string]::IsNullOrWhiteSpace($SynapseHttpAntispamWorkspace)) {
+    throw "-SynapseHttpAntispamWorkspace is required for target '$Target'"
+}
+
+if (-not [string]::IsNullOrWhiteSpace($SynapseHttpAntispamWorkspace)) {
+    if (-not (Test-Path $SynapseHttpAntispamWorkspace)) {
+        throw "Synapse antispam workspace path not found: $SynapseHttpAntispamWorkspace"
+    }
+
+    if (-not (Test-Path (Join-Path $SynapseHttpAntispamWorkspace "synapse_http_antispam.py"))) {
+        throw "Synapse antispam workspace must contain synapse_http_antispam.py: $SynapseHttpAntispamWorkspace"
+    }
 }
 
 function Test-CommandExists {
@@ -318,37 +375,57 @@ if ($SourceMode -eq "published-tag") {
     }
 }
 
+$orchestratorContainerName = "ci-box-orchestrator"
+docker rm -f $orchestratorContainerName *> $null
+
 $dockerArgs = @(
-    "run", "--rm", "--privileged", "--cgroupns=host",
+    "run", "--rm", "--name", $orchestratorContainerName, "--privileged", "--cgroupns=host",
     "-e", "CI=1",
     "-e", "CI_BOX_MODE=local",
+    "-e", "CI_BOX_NO_CACHE=$(if ($NoCache.IsPresent) { '1' } else { '0' })",
+    "-e", "CI_BOX_TIMING_VERBOSE=$(if ($VerboseTiming.IsPresent) { '1' } else { '0' })",
+    "-e", "CI_BOX_LOG_DIR=/ci-box-logs/$runId",
     "-e", "WORKSPACE_SRC=/workspace-src",
     "-e", "WORKSPACE_DST=/workspace-cache/workspace",
     "-v", "${Workspace}:/workspace-src:ro",
+    "-v", "${LogDir}:/ci-box-logs",
     "-v", "ci-box-workspace-cache:/workspace-cache",
     "-v", "ci-box-npm-cache:/cache/npm",
     "-v", "ci-box-cargo-cache:/cache/cargo",
     "-v", "ci-box-docker-data:/var/lib/docker"
 )
 
-if ($NoCache.IsPresent) {
-    $dockerArgs += @("-e", "CI_BOX_NO_CACHE=1")
+if (-not [string]::IsNullOrWhiteSpace($SynapseHttpAntispamWorkspace)) {
+    $dockerArgs += @("-v", "${SynapseHttpAntispamWorkspace}:/workspace-antispam-src:ro")
+    $dockerArgs += @("-e", "CI_BOX_SYNAPSE_HTTP_ANTISPAM_SOURCE=/workspace-antispam-src")
 }
 
-if ($DebugLogs.IsPresent) {
-    $dockerArgs += @("-e", "CI_BOX_VERBOSE=1")
+if (-not [string]::IsNullOrWhiteSpace($SynapseImage)) {
+    $dockerArgs += @("-e", "CI_BOX_SYNAPSE_IMAGE=$SynapseImage")
 }
 
-if ($VerboseTiming.IsPresent) {
-    $dockerArgs += @("-e", "CI_BOX_TIMING_VERBOSE=1")
+if (-not [string]::IsNullOrWhiteSpace($PostgresImage)) {
+    $dockerArgs += @("-e", "CI_BOX_POSTGRES_IMAGE=$PostgresImage")
+}
+
+if (-not [string]::IsNullOrWhiteSpace($ReverseProxyImage)) {
+    $dockerArgs += @("-e", "CI_BOX_REVERSE_PROXY_IMAGE=$ReverseProxyImage")
+}
+
+if (-not [string]::IsNullOrWhiteSpace($Role)) {
+    $dockerArgs += @("-e", "CI_BOX_ROLE=$Role")
 }
 
 $dockerArgs += @($Image, $Target)
+
 if ($ExtraArgs) {
     $dockerArgs += $ExtraArgs
 }
 
 Write-Host "[ci-box] running target $Target against workspace $Workspace"
 Write-Host "[ci-box] container image ref: $Image"
-& docker @dockerArgs
-exit $LASTEXITCODE
+$orchestratorLog = Join-Path $runLogDir "orchestrator.log"
+Write-Host "[ci-box] logs: $runLogDir"
+& docker @dockerArgs 2>&1 | Tee-Object -FilePath $orchestratorLog
+$exitCode = $LASTEXITCODE
+exit $exitCode

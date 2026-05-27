@@ -82,11 +82,14 @@ jobs:
           file: ./Dockerfile
           push: true
           platforms: ${{ env.PLATFORMS }}
-          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}
           cache-to: type=gha,mode=max,scope=${{ env.CACHE_SCOPE }}
           sbom: true
+          provenance: true
+          # prettier-ignore
+          outputs: type=image,name=target,annotation-index.org.opencontainers.image.description=CI in a box is a self-contained CI environment for Draupnir and similar projects.
+          tags: ${{ steps.meta.outputs.tags }}
 
       - name: Attest pushed image
         uses: actions/attest@v4
